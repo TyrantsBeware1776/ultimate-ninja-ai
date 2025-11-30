@@ -1,141 +1,118 @@
-import { GoogleGenAI, Modality } from "@google/genai";
-import { VOICES, getVoiceModel } from "./voiceRegistry";
 
-/* -----------------------------------------------------------
-   BASE64 DECODE → BYTES
------------------------------------------------------------ */
+import { GoogleGenAI, Modality } from "@google/genai";
+
+// Helper to decode base64 audio
 export function decode(base64: string) {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
   }
   return bytes;
 }
 
-/* -----------------------------------------------------------
-   PCM → WAV (Stable Output for Audio Elements)
------------------------------------------------------------ */
-export function pcmToWav(pcmData: Uint8Array, sampleRate: number = 24000) {
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-  const blockAlign = numChannels * bitsPerSample / 8;
+// Manual PCM Decoder for raw audio streams (Gemini output)
+// Browsers cannot natively decode raw PCM without headers using decodeAudioData
+export async function decodePcmToAudioBuffer(
+  data: Uint8Array,
+  ctx: AudioContext,
+  sampleRate: number = 24000,
+  numChannels: number = 1,
+): Promise<AudioBuffer> {
+  // Ensure 16-bit alignment
+  if (data.byteLength % 2 !== 0) {
+      const newData = new Uint8Array(data.byteLength + 1);
+      newData.set(data);
+      data = newData;
+  }
 
-  const wavHeader = new ArrayBuffer(44);
-  const view = new DataView(wavHeader);
+  const dataInt16 = new Int16Array(data.buffer, data.byteOffset, data.byteLength / 2);
+  const frameCount = dataInt16.length / numChannels;
+  const buffer = ctx.createBuffer(numChannels, frameCount, sampleRate);
 
-  const writeString = (offset: number, str: string) => {
-    for (let i = 0; i < str.length; i++) {
-      view.setUint8(offset + i, str.charCodeAt(i));
+  for (let channel = 0; channel < numChannels; channel++) {
+    const channelData = buffer.getChannelData(channel);
+    for (let i = 0; i < frameCount; i++) {
+      channelData[i] = dataInt16[i * numChannels + channel] / 32768.0;
     }
-  };
-
-  writeString(0, "RIFF");
-  view.setUint32(4, 36 + pcmData.length, true);
-  writeString(8, "WAVE");
-  writeString(12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(36, "data");
-  view.setUint32(40, pcmData.length, true);
-
-  return URL.createObjectURL(new Blob([wavHeader, pcmData], { type: "audio/wav" }));
+  }
+  return buffer;
 }
 
-/* -----------------------------------------------------------
-   SCRIPT GENERATION
------------------------------------------------------------ */
 export const generateSkitScript = async (
   prompt: string,
   characters: { name: string; voice: string; personality?: string }[]
 ): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  
+  const charDescription = characters.map(c => 
+    c.personality ? `${c.name} (Personality: ${c.personality})` : c.name
+  ).join(", ");
 
-  const charList = characters
-    .map(c => `${c.name}${c.personality ? ` (Personality: ${c.personality})` : ""}`)
-    .join(", ");
-
-  const systemInstruction = `
-You are a professional dialogue writer.
-Write ONLY character dialogue — NO scene descriptions.
-Format EXACTLY like:
-
-Name: "line"
-Name: "line"
-
-Keep voices distinct and under 100 words total.
-Characters included: ${charList}
-`;
+  const systemInstruction = `You are a creative screenwriter. Write a short dialogue skit between the following characters: ${charDescription}. 
+  Ensure each character speaks according to their defined personality.
+  Format the output exactly as follows:
+  CharacterName: "Line of dialogue"
+  CharacterName: "Line of dialogue"
+  Do not add scene descriptions or actions, only dialogue. Keep it under 100 words total.`;
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: 'gemini-2.5-flash',
     contents: prompt,
-    config: { systemInstruction }
+    config: {
+      systemInstruction,
+    },
   });
 
   return response.text || "";
 };
 
-/* -----------------------------------------------------------
-   AUDIO TRANSCRIPTION
------------------------------------------------------------ */
-export const transcribeAudio = async (blob: Blob): Promise<string> => {
+export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-  const base64 = await blobToBase64(blob);
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: {
-      parts: [
-        {
-          inlineData: { mimeType: blob.type, data: base64 }
-        },
-        { text: "Transcribe the speech exactly as spoken." }
-      ]
-    }
+  
+  // Convert blob to base64
+  const reader = new FileReader();
+  return new Promise((resolve, reject) => {
+    reader.onloadend = async () => {
+      const base64data = (reader.result as string).split(',')[1];
+      try {
+        const response = await ai.models.generateContent({
+          model: 'gemini-2.5-flash',
+          contents: {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: audioBlob.type,
+                  data: base64data
+                }
+              },
+              { text: "Transcribe the speech in this audio exactly." }
+            ]
+          }
+        });
+        resolve(response.text || "");
+      } catch (e) {
+        reject(e);
+      }
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(audioBlob);
   });
-
-  return response.text || "";
 };
 
-function blobToBase64(blob: Blob): Promise<string> {
-  return new Promise((res, rej) => {
-    const r = new FileReader();
-    r.onloadend = () => {
-      const base64 = (r.result as string).split(",")[1];
-      res(base64);
-    };
-    r.onerror = rej;
-    r.readAsDataURL(blob);
-  });
-}
-
-/* -----------------------------------------------------------
-   MULTI-SPEAKER AI AUDIO (UNLIMITED CHARACTERS)
------------------------------------------------------------ */
 export const generateMultiSpeakerAudio = async (
-  script: string
+  script: string,
+  characterMap: Record<string, string> // Character Name -> Gemini Voice Name
 ): Promise<string | null> => {
   const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-  // Auto-detect speaker names from script
-  const speakerNames: string[] = Array.from(
-    script.matchAll(/^([A-Za-z0-9_ ]+):/gm)
-  ).map(match => match[1].trim());
-
-  // Build speaker voice config
-  const speakerVoiceConfigs = speakerNames.map(name => ({
+  // Construct speaker config
+  const speakerVoiceConfigs = Object.entries(characterMap).map(([name, voiceName]) => ({
     speaker: name,
     voiceConfig: {
-      prebuiltVoiceConfig: { voiceName: getVoiceModel(name) }
-    }
+      prebuiltVoiceConfig: { voiceName },
+    },
   }));
 
   try {
@@ -146,65 +123,110 @@ export const generateMultiSpeakerAudio = async (
         responseModalities: [Modality.AUDIO],
         speechConfig: {
           multiSpeakerVoiceConfig: {
-            speakerVoiceConfigs
-          }
-        }
-      }
+            speakerVoiceConfigs: speakerVoiceConfigs,
+          },
+        },
+      },
     });
 
-    const base64Audio =
-      response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
-
+    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
     if (!base64Audio) return null;
 
-    return base64Audio;
-  } catch (err) {
-    console.error("Multi-speaker TTS error:", err);
-    throw err;
+    return base64Audio; 
+  } catch (e) {
+    console.error("TTS Error", e);
+    throw e;
   }
 };
 
-/* -----------------------------------------------------------
-   VIDEO GENERATION (UNCHANGED)
------------------------------------------------------------ */
+// Veo Video Generation
 export const generateVideoFromImage = async (
   imageBase64: string,
   prompt: string
 ): Promise<string | null> => {
-  if (window.aistudio?.hasSelectedApiKey) {
-    const hasKey = await window.aistudio.hasSelectedApiKey();
-    if (!hasKey) await window.aistudio.openSelectKey();
-  }
-
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-
-  try {
-    let operation = await ai.models.generateVideos({
-      model: "veo-3.1-fast-generate-preview",
-      prompt: prompt || "Animate this character speaking naturally",
-      image: { imageBytes: imageBase64, mimeType: "image/png" },
-      config: {
-        numberOfVideos: 1,
-        resolution: "720p",
-        aspectRatio: "16:9"
-      }
-    });
-
-    while (!operation.done) {
-      await new Promise(r => setTimeout(r, 5000));
-      operation = await ai.operations.getVideosOperation({ operation });
+    // Check for Paid Key
+    // @ts-ignore
+    if (window.aistudio && window.aistudio.hasSelectedApiKey) {
+        // @ts-ignore
+        const hasKey = await window.aistudio.hasSelectedApiKey();
+        if (!hasKey) {
+            // @ts-ignore
+            await window.aistudio.openSelectKey();
+            // Assume success after dialog
+        }
     }
 
-    const uri = operation.response?.generatedVideos?.[0]?.video?.uri;
-    if (!uri) return null;
+    // Must re-init client to pick up the selected key if it changed
+    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-    const fetched = await fetch(`${uri}&key=${process.env.API_KEY}`);
-    return URL.createObjectURL(await fetched.blob());
-  } catch (e) {
-    console.error("Veo Error:", e);
-    if (e instanceof Error && e.message.includes("Requested entity was not found")) {
-      await window.aistudio?.openSelectKey();
+    try {
+        let operation = await ai.models.generateVideos({
+            model: 'veo-3.1-fast-generate-preview',
+            prompt: prompt || "Animate this character speaking naturally",
+            image: {
+                imageBytes: imageBase64,
+                mimeType: 'image/png', // Assuming PNG for now
+            },
+            config: {
+                numberOfVideos: 1,
+                resolution: '720p',
+                aspectRatio: '16:9'
+            }
+        });
+
+        while (!operation.done) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+            operation = await ai.operations.getVideosOperation({ operation: operation });
+        }
+
+        const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
+        if (!videoUri) return null;
+
+        // Fetch the actual video bytes
+        const videoRes = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+        const blob = await videoRes.blob();
+        return URL.createObjectURL(blob);
+
+    } catch (e) {
+        console.error("Veo Error", e);
+        // If entity not found (key issue), prompt again
+        if (e instanceof Error && e.message.includes("Requested entity was not found")) {
+             // @ts-ignore
+             if (window.aistudio) await window.aistudio.openSelectKey();
+        }
+        throw e;
     }
-    throw e;
-  }
-};
+}
+
+// Helper to add WAV header to PCM data for easier playback in standard audio elements
+export function pcmToWav(pcmData: Uint8Array, sampleRate: number = 24000) {
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * bitsPerSample / 8;
+    const blockAlign = numChannels * bitsPerSample / 8;
+    const wavHeader = new ArrayBuffer(44);
+    const view = new DataView(wavHeader);
+
+    const writeString = (view: DataView, offset: number, string: string) => {
+        for (let i = 0; i < string.length; i++) {
+            view.setUint8(offset + i, string.charCodeAt(i));
+        }
+    };
+
+    writeString(view, 0, 'RIFF');
+    view.setUint32(4, 36 + pcmData.length, true);
+    writeString(view, 8, 'WAVE');
+    writeString(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);
+    view.setUint16(20, 1, true);
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    writeString(view, 36, 'data');
+    view.setUint32(40, pcmData.length, true);
+
+    const wavBlob = new Blob([wavHeader, pcmData], { type: 'audio/wav' });
+    return URL.createObjectURL(wavBlob);
+}
