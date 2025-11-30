@@ -1,0 +1,7 @@
+{
+  "name": "Ultimate Ninja AI Editor",
+  "description": "A professional-grade video editing suite powered by Gemini. Create animated skits from still photos with multi-speaker AI voices and Veo video generation.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
