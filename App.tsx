@@ -135,25 +135,21 @@ function App() {
         source.buffer = audioBuffer;
         
         // Handle Playback Rate
-        const playbackRate = clip.speed;
-        source.playbackRate.value = playbackRate; 
+        source.playbackRate.value = clip.speed; 
         
         // Connect to Master Gain instead of Destination directly
         source.connect(masterGainRef.current!);
         
         const offset = clip.start - state.currentTime;
-        const bufferPlayDuration = clip.duration * playbackRate;
         
         if (offset >= 0) {
-           source.start(audioContextRef.current!.currentTime + offset, clip.offset, bufferPlayDuration);
+           source.start(audioContextRef.current!.currentTime + offset, clip.offset, clip.duration);
         } else if (offset < 0) {
            const timeIntoClip = Math.abs(offset);
            if (timeIntoClip < clip.duration) {
-                const bufferOffset = clip.offset + (timeIntoClip * playbackRate);
-                const durationRemaining = (clip.duration - timeIntoClip) * playbackRate; 
-                if (durationRemaining > 0) {
-                  source.start(audioContextRef.current!.currentTime, bufferOffset, durationRemaining);
-                }
+                const bufferOffset = clip.offset + (timeIntoClip * clip.speed);
+                const durationRemaining = (clip.duration - timeIntoClip); 
+                source.start(audioContextRef.current!.currentTime, bufferOffset, durationRemaining);
            }
         }
         activeSourcesRef.current.set(clip.id, source);
@@ -269,9 +265,7 @@ function App() {
          const timeElapsedInClip = time - clip.start;
          const videoTime = clip.offset + (timeElapsedInClip * clip.speed);
          
-         const drift = Math.abs(videoEl.currentTime - videoTime);
-         const tolerance = clip.speed !== 1 ? 0.05 : 0.3;
-         if (drift > tolerance) {
+         if (Math.abs(videoEl.currentTime - videoTime) > 0.3) {
              videoEl.currentTime = videoTime;
          }
        }
