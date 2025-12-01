@@ -157,12 +157,15 @@ export const SkitGenerator: React.FC<SkitGeneratorProps> = ({ onAddClip, onClose
        const reader = new FileReader();
        reader.readAsDataURL(char.image);
        reader.onloadend = async () => {
-           const base64data = (reader.result as string).split(',')[1];
+           const result = reader.result as string;
+           const [meta, data] = result.split(',');
+           const mimeType = meta.split(':')[1]?.split(';')[0] || 'image/png';
+           const base64data = data;
            const prompt = customPrompts[charId] 
               ? `A video of ${char.name} ${customPrompts[charId]}`
               : `A video of ${char.name} talking, looking at the camera, natural movement.`;
               
-           const videoUrl = await generateVideoFromImage(base64data, prompt);
+           const videoUrl = await generateVideoFromImage(base64data, mimeType, prompt);
            if (videoUrl) {
                onAddClip('video', videoUrl, `Anim: ${char.name}`, 6); 
            } else {

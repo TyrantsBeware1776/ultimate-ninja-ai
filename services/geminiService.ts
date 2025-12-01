@@ -1,6 +1,32 @@
 
 import { GoogleGenAI, Modality } from "@google/genai";
 
+async function resolveApiKey(): Promise<string> {
+  // Prefer runtime-selected key via AI Studio helper if available
+  if (typeof window !== "undefined" && (window as any).aistudio?.hasSelectedApiKey) {
+    // @ts-ignore
+    const hasKey = await window.aistudio.hasSelectedApiKey();
+    if (!hasKey && (window as any).aistudio?.openSelectKey) {
+      // @ts-ignore
+      await window.aistudio.openSelectKey();
+    }
+    // @ts-ignore
+    const selectedKey = await window.aistudio.getSelectedApiKey?.();
+    if (selectedKey) return selectedKey;
+  }
+
+  // Local storage fallback (runtime-provided to avoid bundling secrets)
+  if (typeof window !== "undefined") {
+    const stored = localStorage.getItem("gemini_api_key");
+    if (stored) return stored;
+  }
+
+  // Env fallback (will be bundled if set; prefer runtime sources above)
+  const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || process.env.GEMINI_API_KEY || process.env.API_KEY;
+  if (!envKey) throw new Error("Missing Gemini API key. Provide one via AI Studio key picker or localStorage.");
+  return envKey;
+}
+
 // Helper to decode base64 audio
 export function decode(base64: string) {
   const binaryString = atob(base64);
@@ -44,7 +70,8 @@ export const generateSkitScript = async (
   prompt: string,
   characters: { name: string; voice: string; personality?: string }[]
 ): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await resolveApiKey();
+  const ai = new GoogleGenAI({ apiKey });
   
   const charDescription = characters.map(c => 
     c.personality ? `${c.name} (Personality: ${c.personality})` : c.name
@@ -59,7 +86,12 @@ export const generateSkitScript = async (
 
   const response = await ai.models.generateContent({
     model: 'gemini-2.5-flash',
-    contents: prompt,
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: prompt }]
+      }
+    ],
     config: {
       systemInstruction,
     },
@@ -69,7 +101,8 @@ export const generateSkitScript = async (
 };
 
 export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await resolveApiKey();
+  const ai = new GoogleGenAI({ apiKey });
   
   // Convert blob to base64
   const reader = new FileReader();
@@ -78,18 +111,21 @@ export const transcribeAudio = async (audioBlob: Blob): Promise<string> => {
       const base64data = (reader.result as string).split(',')[1];
       try {
         const response = await ai.models.generateContent({
-          model: 'gemini-2.5-flash',
-          contents: {
-            parts: [
-              {
-                inlineData: {
-                  mimeType: audioBlob.type,
-                  data: base64data
-                }
-              },
-              { text: "Transcribe the speech in this audio exactly." }
-            ]
-          }
+          model: 'gemini-2.5-flash-audio',
+          contents: [
+            {
+              role: "user",
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: audioBlob.type,
+                    data: base64data
+                  }
+                },
+                { text: "Transcribe the speech in this audio exactly." }
+              ]
+            }
+          ]
         });
         resolve(response.text || "");
       } catch (e) {
@@ -105,7 +141,8 @@ export const generateMultiSpeakerAudio = async (
   script: string,
   characterMap: Record<string, string> // Character Name -> Gemini Voice Name
 ): Promise<string | null> => {
-  const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+  const apiKey = await resolveApiKey();
+  const ai = new GoogleGenAI({ apiKey });
 
   // Construct speaker config
   const speakerVoiceConfigs = Object.entries(characterMap).map(([name, voiceName]) => ({
@@ -121,6 +158,10 @@ export const generateMultiSpeakerAudio = async (
       contents: [{ parts: [{ text: script }] }],
       config: {
         responseModalities: [Modality.AUDIO],
+        audioConfig: {
+          audioEncoding: "LINEAR16",
+          sampleRateHertz: 24000,
+        },
         speechConfig: {
           multiSpeakerVoiceConfig: {
             speakerVoiceConfigs: speakerVoiceConfigs,
@@ -129,7 +170,9 @@ export const generateMultiSpeakerAudio = async (
       },
     });
 
-    const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+    const base64Audio = response.candidates
+      ?.flatMap(c => c.content?.parts || [])
+      .find(p => (p as any).inlineData?.data)?.inlineData?.data;
     if (!base64Audio) return null;
 
     return base64Audio; 
@@ -142,6 +185,7 @@ export const generateMultiSpeakerAudio = async (
 // Veo Video Generation
 export const generateVideoFromImage = async (
   imageBase64: string,
+  mimeType: string,
   prompt: string
 ): Promise<string | null> => {
     // Check for Paid Key
@@ -157,7 +201,8 @@ export const generateVideoFromImage = async (
     }
 
     // Must re-init client to pick up the selected key if it changed
-    const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+    const apiKey = await resolveApiKey();
+    const ai = new GoogleGenAI({ apiKey });
 
     try {
         let operation = await ai.models.generateVideos({
@@ -165,7 +210,7 @@ export const generateVideoFromImage = async (
             prompt: prompt || "Animate this character speaking naturally",
             image: {
                 imageBytes: imageBase64,
-                mimeType: 'image/png', // Assuming PNG for now
+                mimeType,
             },
             config: {
                 numberOfVideos: 1,
@@ -176,14 +221,19 @@ export const generateVideoFromImage = async (
 
         while (!operation.done) {
             await new Promise(resolve => setTimeout(resolve, 5000));
-            operation = await ai.operations.getVideosOperation({ operation: operation });
+            const opName = (operation as any).name || operation;
+            operation = await ai.operations.getVideosOperation({ operation: opName });
         }
 
         const videoUri = operation.response?.generatedVideos?.[0]?.video?.uri;
         if (!videoUri) return null;
 
         // Fetch the actual video bytes
-        const videoRes = await fetch(`${videoUri}&key=${process.env.API_KEY}`);
+        const videoRes = await fetch(videoUri, {
+            headers: {
+                "X-Goog-Api-Key": apiKey,
+            }
+        });
         const blob = await videoRes.blob();
         return URL.createObjectURL(blob);
 

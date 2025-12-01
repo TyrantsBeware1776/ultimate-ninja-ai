@@ -36,9 +36,9 @@ Prerequisites
 Node.js
  (version 18 or later). You may verify your version with node --version.
 
-A Gemini API key with access to the TTS and Veo endpoints. Place this key in a .env.local file at the project root:
-
-GEMINI_API_KEY=your-key-here
+A Gemini API key with access to the TTS and Veo endpoints. Provide this key at runtime (preferred) by running 
+localStorage.setItem('gemini_api_key', '<your-key-here>') 
+in the browser console or via the AI Studio key picker. You may also place it in a .env.local file as VITE_GEMINI_API_KEY (note: build-time envs are bundled, so prefer runtime injection for security).
 
 Installation and Running
 
